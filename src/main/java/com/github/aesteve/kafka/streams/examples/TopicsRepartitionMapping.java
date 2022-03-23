@@ -1,5 +1,10 @@
 package com.github.aesteve.kafka.streams.examples;
 
+import com.github.aesteve.kafka.streams.examples.conf.ConfLoader;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.Metric;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
@@ -14,17 +19,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 public class TopicsRepartitionMapping {
 
     private final static Logger LOG = LoggerFactory.getLogger(TopicsRepartitionMapping.class);
 
-    public final static String INPUT_TOPIC = "incoming-topic";
+    public final static String INPUT_TOPIC_PREFIX = "incoming-topic";
+    public final static Pattern INPUT_TOPICS_PATTERN = Pattern.compile(inputTopicFor("[1-5]"));
     public final static String OUTPUT_TOPIC_PREFIX = "output-topic";
     public final static String TENANT_ID_HEADER = "tenant-id";
+    public final static Integer NB_THREADS = 60;
 
     private static Optional<String> getTenantId(Headers headers) {
         return Optional
@@ -32,8 +42,12 @@ public class TopicsRepartitionMapping {
                 .map(h -> new String(h.value(), StandardCharsets.UTF_8));
     }
 
-    public static String topicFor(String tenantId) {
+    public static String outputTopicFor(String tenantId) {
         return String.format("%s-%s", OUTPUT_TOPIC_PREFIX, tenantId);
+    }
+
+    public static String inputTopicFor(String tenantId) {
+        return String.format("%s-%s", INPUT_TOPIC_PREFIX, tenantId);
     }
 
     private static class TenantIdTransformer implements  Transformer<String, String, KeyValue<String, String>> {
@@ -54,29 +68,86 @@ public class TopicsRepartitionMapping {
 
     }
 
-    public static Properties streamProps() {
-        var props = new Properties();
-        props.put(StreamsConfig.APPLICATION_ID_CONFIG, "repartition-topics");
-        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2); // <-- may be useful !!
+    public static Properties streamProps() throws Exception {
+        var props = ConfLoader.fromResources("ccloud.properties");
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, "2-repartition-topics");
+        // props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2); // <-- may be useful !! (seems bugged, facing this: https://stackoverflow.com/questions/70138589/kafka-streams-with-exactly-once-v2-invalidproducerepochexception-producer-atte)
+
+        props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, NB_THREADS.toString()); // <-- parallelism! (50 partitions for the 30 input topics). Could also use N app instances
+        // note: using too many threads, or subscribing to too many topics at once leads to weird timeout issues in fetch requests? Why?
+
+
+        // props.put(StreamsConfig.POLL_MS_CONFIG, "1");
+        // props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
+
+//        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, "10000000");
+//        props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, "1000000000");
+//        props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "1000");
+//        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "50000");
+
+//        props.put(ProducerConfig.LINGER_MS_CONFIG, "1000"); // allow for batching
+//        props.put(ProducerConfig.ACKS_CONFIG, "1");
+        // props.put(ProducerConfig.BATCH_SIZE_CONFIG, "5000000");
         return props;
     }
 
-    public static KafkaStreams createStream(StreamsBuilder builder) {
+    public static KafkaStreams createStream(StreamsBuilder builder) throws Exception {
         // Topology part
         var consumedWith = Consumed.with(Serdes.String(), Serdes.String()); // <-- use your own here
         var producedWith = Produced.with(Serdes.String(), Serdes.String()); // <-- use your own here
-        builder.stream(INPUT_TOPIC, consumedWith)
+        builder.stream(INPUT_TOPICS_PATTERN, consumedWith)
                 .transform(TenantIdTransformer::new)
-                .to((key, value, context) -> topicFor(getTenantId(context.headers()).orElse(null)), producedWith);
+                .to((key, value, context) -> outputTopicFor(getTenantId(context.headers()).orElse(null)), producedWith);
         return new KafkaStreams(builder.build(), streamProps());
     }
 
 
-    public static void main(String... args) {
+    public static void main(String... args) throws Exception {
         var builder = new StreamsBuilder();
         var stream = createStream(builder);
+        startPublishingMetrics(stream);
         runStreamingApp(stream);
+    }
+
+    static void startPublishingMetrics(KafkaStreams streams) {
+        var isRunning = new AtomicBoolean(false);
+        var metricsThread = new Thread(() -> {
+            var start = System.currentTimeMillis();
+            isRunning.set(true);
+            while (isRunning.get()) {
+                var elapsedSeconds = (System.currentTimeMillis() - start) / 1000;
+                var metrics = streams.metrics();
+                var sent = totalSentRecords(metrics);
+                var ratePerSec = sent / elapsedSeconds;
+                var avgRateMetric = sumProduceRates(metrics);
+                LOG.info("Records sent: {} msgs. Avg rate: {} msg/s. (avg metric rate: {} msg/s)", sent, ratePerSec, avgRateMetric);
+                try {
+                    Thread.sleep(1_000);
+                } catch(Exception e) {}
+            }
+        });
+        Runtime.getRuntime()
+                .addShutdownHook(new Thread(() -> isRunning.set(false)));
+        metricsThread.start();
+    }
+
+    static double sumProduceRates(Map<MetricName, ? extends Metric> metrics) {
+        return metrics
+                .entrySet()
+                .stream()
+                .filter(e -> e.getKey().name().equals("record-send-rate") && e.getKey().group().equals("producer-metrics"))
+                .mapToDouble(e -> (double) e.getValue().metricValue())
+                .sum();
+
+    }
+
+    static double totalSentRecords(Map<MetricName, ? extends Metric> metrics) {
+        return metrics
+                .entrySet()
+                .stream()
+                .filter(e -> e.getKey().name().equals("record-send-total") && e.getKey().group().equals("producer-metrics"))
+                .mapToDouble(e -> (double) e.getValue().metricValue())
+                .sum();
     }
 
     private static void runStreamingApp(KafkaStreams stream) {

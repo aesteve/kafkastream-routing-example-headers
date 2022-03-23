@@ -6,14 +6,33 @@
                 %d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n
             </Pattern>
         </layout>
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>INFO</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>streams.log</file>
+        <append>true</append>
+        <!-- set immediateFlush to false for much higher logging throughput -->
+        <immediateFlush>false</immediateFlush>
+        <!-- encoders are assigned the type
+             ch.qos.logback.classic.encoder.PatternLayoutEncoder by default -->
+        <encoder>
+            <Pattern>
+                %d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n
+            </Pattern>
+        </encoder>
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>DEBUG</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
     </appender>
 
-    <logger name="com.mkyong" level="debug" additivity="false">
+    <root level="info">
         <appender-ref ref="CONSOLE"/>
-    </logger>
-
-    <root level="error">
-        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE" />
     </root>
-
 </configuration>
