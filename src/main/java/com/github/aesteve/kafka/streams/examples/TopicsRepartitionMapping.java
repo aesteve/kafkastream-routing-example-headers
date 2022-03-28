@@ -1,7 +1,6 @@
 package com.github.aesteve.kafka.streams.examples;
 
 import com.github.aesteve.kafka.streams.examples.conf.ConfLoader;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
@@ -30,11 +29,13 @@ public class TopicsRepartitionMapping {
 
     private final static Logger LOG = LoggerFactory.getLogger(TopicsRepartitionMapping.class);
 
+    public static final String APPLICATION_ID = "5-repartition-topics"; // change to re-consume from start
+
     public final static String INPUT_TOPIC_PREFIX = "incoming-topic";
-    public final static Pattern INPUT_TOPICS_PATTERN = Pattern.compile(inputTopicFor("[1-5]"));
+    public final static Pattern INPUT_TOPICS_PATTERN = Pattern.compile(inputTopicFor("[0-5]"));
     public final static String OUTPUT_TOPIC_PREFIX = "output-topic";
     public final static String TENANT_ID_HEADER = "tenant-id";
-    public final static Integer NB_THREADS = 60;
+    public final static Integer NB_THREADS = 1; // 5 input topics w/ 50 partitions each => 250
 
     private static Optional<String> getTenantId(Headers headers) {
         return Optional
@@ -70,24 +71,23 @@ public class TopicsRepartitionMapping {
 
     public static Properties streamProps() throws Exception {
         var props = ConfLoader.fromResources("ccloud.properties");
-        props.put(StreamsConfig.APPLICATION_ID_CONFIG, "2-repartition-topics");
-        // props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2); // <-- may be useful !! (seems bugged, facing this: https://stackoverflow.com/questions/70138589/kafka-streams-with-exactly-once-v2-invalidproducerepochexception-producer-atte)
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, APPLICATION_ID);
+        // props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2); // <-- may be useful !! FIXME (seems bugged, facing this: https://stackoverflow.com/questions/70138589/kafka-streams-with-exactly-once-v2-invalidproducerepochexception-producer-atte)
 
         props.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, NB_THREADS.toString()); // <-- parallelism! (50 partitions for the 30 input topics). Could also use N app instances
-        // note: using too many threads, or subscribing to too many topics at once leads to weird timeout issues in fetch requests? Why?
+        // FIXME: using too many threads, or subscribing to too many topics at once leads to weird timeout issues in fetch requests? Why?
 
-
-        // props.put(StreamsConfig.POLL_MS_CONFIG, "1");
-        // props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
+//        props.put(StreamsConfig.POLL_MS_CONFIG, "1");
+//        props.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
 
 //        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, "10000000");
 //        props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, "1000000000");
 //        props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, "1000");
 //        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "50000");
 
-//        props.put(ProducerConfig.LINGER_MS_CONFIG, "1000"); // allow for batching
-//        props.put(ProducerConfig.ACKS_CONFIG, "1");
-        // props.put(ProducerConfig.BATCH_SIZE_CONFIG, "5000000");
+        props.put(ProducerConfig.LINGER_MS_CONFIG, "10"); // allow for batching
+        props.put(ProducerConfig.ACKS_CONFIG, "all");
+         props.put(ProducerConfig.BATCH_SIZE_CONFIG, "200000");
         return props;
     }
 
@@ -112,12 +112,17 @@ public class TopicsRepartitionMapping {
     static void startPublishingMetrics(KafkaStreams streams) {
         var isRunning = new AtomicBoolean(false);
         var metricsThread = new Thread(() -> {
-            var start = System.currentTimeMillis();
             isRunning.set(true);
+            var hasSent = false;
+            var start = System.currentTimeMillis();
             while (isRunning.get()) {
-                var elapsedSeconds = (System.currentTimeMillis() - start) / 1000;
                 var metrics = streams.metrics();
                 var sent = totalSentRecords(metrics);
+                if (sent > 0 && !hasSent) {
+                    start = System.currentTimeMillis();
+                    hasSent = true;
+                }
+                var elapsedSeconds = (System.currentTimeMillis() - start) / 1000;
                 var ratePerSec = sent / elapsedSeconds;
                 var avgRateMetric = sumProduceRates(metrics);
                 LOG.info("Records sent: {} msgs. Avg rate: {} msg/s. (avg metric rate: {} msg/s)", sent, ratePerSec, avgRateMetric);
@@ -132,13 +137,16 @@ public class TopicsRepartitionMapping {
     }
 
     static double sumProduceRates(Map<MetricName, ? extends Metric> metrics) {
+        return producerMetric(metrics, "record-send-rate");
+    }
+
+    static double producerMetric(Map<MetricName, ? extends Metric> metrics, String metric) {
         return metrics
                 .entrySet()
                 .stream()
-                .filter(e -> e.getKey().name().equals("record-send-rate") && e.getKey().group().equals("producer-metrics"))
+                .filter(e -> e.getKey().name().equals(metric) && e.getKey().group().equals("producer-metrics"))
                 .mapToDouble(e -> (double) e.getValue().metricValue())
                 .sum();
-
     }
 
     static double totalSentRecords(Map<MetricName, ? extends Metric> metrics) {

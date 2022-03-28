@@ -1,5 +1,7 @@
 plugins {
     java
+    application
+    id("com.github.johnrengelman.shadow") version "7.1.2"
 }
 
 group = "com.github.aesteve"
@@ -26,3 +28,9 @@ dependencies {
 tasks.getByName<Test>("test") {
     useJUnitPlatform()
 }
+
+application {
+//    mainClass.set("com.github.aesteve.kafka.streams.examples.TopicsRepartitionMapping")
+    mainClass.set("com.github.aesteve.kafka.streams.examples.MockDataProducer")
+}
+
