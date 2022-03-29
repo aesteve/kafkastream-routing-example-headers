@@ -2,8 +2,6 @@ package com.github.aesteve.kafka.streams.examples;
 
 import com.github.aesteve.kafka.streams.examples.conf.ConfLoader;
 import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.common.Metric;
-import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
@@ -18,37 +16,27 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
+import static com.github.aesteve.kafka.streams.examples.TestEnv.*;
+import static com.github.aesteve.kafka.streams.examples.utils.MetricUtils.*;
+
 public class TopicsRepartitionMapping {
 
     private final static Logger LOG = LoggerFactory.getLogger(TopicsRepartitionMapping.class);
 
     public static final String APPLICATION_ID = "5-repartition-topics"; // change to re-consume from start
-
-    public final static String INPUT_TOPIC_PREFIX = "incoming-topic";
     public final static Pattern INPUT_TOPICS_PATTERN = Pattern.compile(inputTopicFor("[0-5]"));
-    public final static String OUTPUT_TOPIC_PREFIX = "output-topic";
-    public final static String TENANT_ID_HEADER = "tenant-id";
     public final static Integer NB_THREADS = 1; // 5 input topics w/ 50 partitions each => 250
 
-    private static Optional<String> getTenantId(Headers headers) {
+    private static Optional<String> extractTenantId(Headers headers) {
         return Optional
                 .ofNullable(headers.headers(TENANT_ID_HEADER).iterator().next())
                 .map(h -> new String(h.value(), StandardCharsets.UTF_8));
-    }
-
-    public static String outputTopicFor(String tenantId) {
-        return String.format("%s-%s", OUTPUT_TOPIC_PREFIX, tenantId);
-    }
-
-    public static String inputTopicFor(String tenantId) {
-        return String.format("%s-%s", INPUT_TOPIC_PREFIX, tenantId);
     }
 
     private static class TenantIdTransformer implements  Transformer<String, String, KeyValue<String, String>> {
@@ -61,7 +49,7 @@ public class TopicsRepartitionMapping {
 
         @Override
         public KeyValue<String, String> transform(String key, String value) {
-            return new KeyValue<>(String.format("%s:%s", key, getTenantId(context.headers()).orElse("")), value); // careful with "oldKey:" here <-- check if ok
+            return new KeyValue<>(String.format("%s:%s", key, extractTenantId(context.headers()).orElse("")), value); // careful with "oldKey:" here <-- check if ok
         }
 
         @Override
@@ -97,7 +85,7 @@ public class TopicsRepartitionMapping {
         var producedWith = Produced.with(Serdes.String(), Serdes.String()); // <-- use your own here
         builder.stream(INPUT_TOPICS_PATTERN, consumedWith)
                 .transform(TenantIdTransformer::new)
-                .to((key, value, context) -> outputTopicFor(getTenantId(context.headers()).orElse(null)), producedWith);
+                .to((key, value, context) -> outputTopicFor(extractTenantId(context.headers()).orElse(null)), producedWith);
         return new KafkaStreams(builder.build(), streamProps());
     }
 
@@ -134,28 +122,6 @@ public class TopicsRepartitionMapping {
         Runtime.getRuntime()
                 .addShutdownHook(new Thread(() -> isRunning.set(false)));
         metricsThread.start();
-    }
-
-    static double sumProduceRates(Map<MetricName, ? extends Metric> metrics) {
-        return producerMetric(metrics, "record-send-rate");
-    }
-
-    static double producerMetric(Map<MetricName, ? extends Metric> metrics, String metric) {
-        return metrics
-                .entrySet()
-                .stream()
-                .filter(e -> e.getKey().name().equals(metric) && e.getKey().group().equals("producer-metrics"))
-                .mapToDouble(e -> (double) e.getValue().metricValue())
-                .sum();
-    }
-
-    static double totalSentRecords(Map<MetricName, ? extends Metric> metrics) {
-        return metrics
-                .entrySet()
-                .stream()
-                .filter(e -> e.getKey().name().equals("record-send-total") && e.getKey().group().equals("producer-metrics"))
-                .mapToDouble(e -> (double) e.getValue().metricValue())
-                .sum();
     }
 
     private static void runStreamingApp(KafkaStreams stream) {
