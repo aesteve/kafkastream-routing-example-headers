@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.github.aesteve.kafka.streams.examples.TopicsRepartitionMapping.totalSentRecords;
+import static com.github.aesteve.kafka.streams.examples.utils.MetricUtils.totalSentRecords;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestMetrics extends BaseRepartitionTest{

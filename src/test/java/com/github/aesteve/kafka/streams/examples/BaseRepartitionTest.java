@@ -11,8 +11,8 @@ import org.junit.jupiter.api.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
+import static com.github.aesteve.kafka.streams.examples.TestEnv.*;
 import static com.github.aesteve.kafka.streams.examples.TopicsRepartitionMapping.*;
-import static com.github.aesteve.kafka.streams.examples.TopicsRepartitionMapping.outputTopicFor;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public abstract class BaseRepartitionTest {

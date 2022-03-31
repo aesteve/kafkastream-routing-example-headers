@@ -29,8 +29,19 @@ tasks.getByName<Test>("test") {
     useJUnitPlatform()
 }
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(18))
+    }
+}
+
+tasks.withType<Wrapper> {
+    gradleVersion = "7.4.1"
+}
+
 application {
 //    mainClass.set("com.github.aesteve.kafka.streams.examples.TopicsRepartitionMapping")
-    mainClass.set("com.github.aesteve.kafka.streams.examples.MockDataProducer")
+//    mainClass.set("com.github.aesteve.kafka.streams.examples.ParallelTestDataProducer")
+    mainClass.set("com.github.aesteve.kafka.streams.examples.AllTopicsDataProducer")
 }
 

@@ -83,11 +83,14 @@ public class TopicsRepartitionMapping {
         // Topology part
         var consumedWith = Consumed.with(Serdes.String(), Serdes.String()); // <-- use your own here
         var producedWith = Produced.with(Serdes.String(), Serdes.String()); // <-- use your own here
+        // try repartitioning by tenantId (will create intermediate topic)??
         builder.stream(INPUT_TOPICS_PATTERN, consumedWith)
                 .transform(TenantIdTransformer::new)
                 .to((key, value, context) -> outputTopicFor(extractTenantId(context.headers()).orElse(null)), producedWith);
         return new KafkaStreams(builder.build(), streamProps());
     }
+
+
 
 
     public static void main(String... args) throws Exception {

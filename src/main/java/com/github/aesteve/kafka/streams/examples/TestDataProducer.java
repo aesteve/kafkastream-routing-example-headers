@@ -7,13 +7,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Properties;
-import java.util.UUID;
+import java.util.*;
 
 import static com.github.aesteve.kafka.streams.examples.TestEnv.*;
 import static com.github.aesteve.kafka.streams.examples.utils.MetricUtils.producerMetric;
+import static com.github.aesteve.kafka.streams.examples.utils.RngUtils.gaussianIdxIn;
 
 public interface TestDataProducer {
 //    private static final Random RAND = new Random();
@@ -26,25 +24,49 @@ public interface TestDataProducer {
             int bulkSize,
             int payloadSize,
             List<String> tenantIds,
-            Properties props
+            Properties props,
+            ProduceStrategy produceStrategy
     ) {
         var producer = new KafkaProducer<String, String>(props);
+        var random = new Random();
+        var gaussianTenants = new ArrayList<Integer>();
+        var nbTenants = tenantIds.size();
+        for (int i = 0; i <= totalRecordsToSend; i++) {
+            gaussianTenants.add(gaussianIdxIn(random, nbTenants));
+        }
         LOG.info("Running producer benchmark");
         var totalMsgs = 0;
         var beforeStart = System.currentTimeMillis();
         var nbBatchesSent = 0;
-        var nbTenants = tenantIds.size();
-        var outcome = new TestOutcome(0.0, 0);
+        var outcome = new TestOutcome(0, 0, 0, 0.0, 0);
+        var toSend = new HashMap<String, List<ProducerRecord<String, String>>>(bulkSize);
         while (totalMsgs <= totalRecordsToSend) {
-            var tenantId = tenantIds.get(totalMsgs % nbTenants);
+            var tenantIdx = switch (produceStrategy) {
+                case RANDOM_UNIFORM ->
+                        random.nextInt(nbTenants);
+                case RANDOM_GAUSSIAN ->
+                        gaussianTenants.get(totalMsgs);
+                default ->
+                        totalMsgs % nbTenants;
+            };
+            var tenantId = tenantIds.get(tenantIdx);
 //            int inputTopic = totalMsgs % NB_INPUTS;
             var key = UUID.randomUUID().toString();
             var value = randomPayload(payloadSize);
             var record = new ProducerRecord<>(outputTopicFor(tenantId), key, value);
             record.headers().add(new RecordHeader(TENANT_ID_HEADER, tenantId.getBytes(StandardCharsets.UTF_8)));
-            producer.send(record);
+            if (produceStrategy == ProduceStrategy.GROUP_BY_TENANT) {
+                toSend.computeIfAbsent(tenantId, k -> new ArrayList<>())
+                        .add(record);
+            } else {
+                producer.send(record);
+            }
             totalMsgs++;
             if (totalMsgs % bulkSize == 0) {
+                if (produceStrategy == ProduceStrategy.GROUP_BY_TENANT) {
+                    toSend.values().forEach(perTenant -> perTenant.forEach(producer::send));
+                    toSend.clear(); // should be after clear() to be correct
+                }
                 producer.flush();
                 nbBatchesSent++;
                 var after = System.currentTimeMillis();
@@ -54,8 +76,11 @@ public interface TestDataProducer {
                 var avgSendRate = producerMetric(metrics, "record-send-rate");
                 var queueTimeAvg = producerMetric(metrics, "record-queue-time-avg");
                 var batchSizeAvg = producerMetric(metrics, "batch-size-avg");
+                var requestRate = producerMetric(metrics, "request-rate");
+                var requestLatencyAvg = producerMetric(metrics, "request-latency-avg");
+                var recordsPerRequestAvg = producerMetric(metrics, "records-per-request-avg");
                 var batchAvg = totalMs / nbBatchesSent;
-                LOG.debug("Avg duration spent in queue {}ms. Batch size avg = {}", queueTimeAvg, batchSizeAvg);
+                LOG.info("Avg duration spent in queue {}ms. Batch size avg = {}. Request Rate = {}, Request Latency avg = {}. Records per Request avg = {}", queueTimeAvg, batchSizeAvg, requestRate,requestLatencyAvg, recordsPerRequestAvg);
                 LOG.info(
                         "Sent {} msg to in {}ms. Avg Send rate: {} msg/s. Avg batch duration: {}ms",
                         totalMsgsMetric,
@@ -63,7 +88,7 @@ public interface TestDataProducer {
                         avgSendRate,
                         batchAvg
                 );
-                outcome = new TestOutcome(avgSendRate, batchAvg);
+                outcome = new TestOutcome(totalMs, totalMsgs, ((double)totalMsgs) / (((double)totalMs) / 1000), avgSendRate, batchAvg);
             }
         }
         return outcome;
